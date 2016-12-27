@@ -6,6 +6,7 @@ import random
 import math
 import colorsys
 import copy
+import ParticleSurface
 from dotstar import Adafruit_DotStar
 
 NUM_PIXELS = 120 # Number of LEDs in strip
@@ -21,7 +22,7 @@ MODE_FULLRUN 	= 1
 MODE_FIREWORK	= 2
 MODE_BOUNCE		= 3
 
-s_strip     = Adafruit_DotStar(NUM_PIXELS, DATAPIN, CLOCKPIN)
+s_strip     = Adafruit_DotStar(12000000)
 s_run 		= True
 s_particleSystems = []
 s_surfacePersistenceMult = DEFAULT_PERSISTENCE
@@ -34,7 +35,6 @@ s_nextParticleSpawn = 0
 def initStrip():
 	s_strip.begin()
 	s_strip.setBrightness(255)
-	s_strip.clear()
 
 def stripLoop():
 	while s_run:
@@ -61,7 +61,7 @@ def stripLoop():
 				system.addParticle(FireworkParticle(0, 0, 1, system))
 			if currentMode == MODE_BOUNCE and len(system.particleList) < 2:
 				system.addParticle(BounceParticle(0, 0, system))
-				system.addParticle(BounceParticle(system.surface.w - 1, 0, system))				
+				system.addParticle(BounceParticle(NUM_PIXELS - 1, 0, system))				
 			system.update()
 		for system in s_particleSystems:
 			system.render()
@@ -85,13 +85,6 @@ def colorFloatToInt(colorFloat):
 def colorToRgbInt(color):
 	return (colorFloatToInt(color.red) << 16) | (colorFloatToInt(color.green) << 8) | (colorFloatToInt(color.blue))
 
-def renderStrip(surface, strip, w, h):
-	for i in range(w):
-		for j in range(h):
-			c = surface.getPixel(i, j)
-			strip.setPixelColor(i, c.rgbInt)
-	strip.show()
-
 def clamp(value, lower, upper):
 	return max(min(value, upper), lower)
 
@@ -107,34 +100,6 @@ class RGB:
 		l *= luminanceMod
 		r,g,b = colorsys.hls_to_rgb(h, l, s)
 		return RGB(r, g, b)
-
-class Surface:
-	def __init__(self, width, height):
-		self.w = width
-		self.h = height
-		self.data = [[RGB(0, 0, 0) for i in range(self.h)] for j in range(self.w)]
-
-	def getPixel(self, x, y):
-		return self.data[x][y]
-
-	def setPixel(self, x, y, r, g, b):
-		if x > self.w or y > self.h:
-			return
-		self.data[x][y] = RGB(r, g, b)
-	
-	def clear(self):
-		for i in range(self.w):
-			for j in range(self.h):
-				self.data[i][j].red = 0
-				self.data[i][j].green = 0
-				self.data[i][j].blue = 0
-
-	def applyLuminanceMod(self, luminance):
-		for i in range(self.w):
-			for j in range(self.h):
-				c = self.getPixel(i, j)
-				l = c.GetRGBWithLuminanceMod(luminance)
-				self.setPixel(i, j, l.red, l.green, l.blue)
 
 class Particle(object):
 	def __init__(self, x, y):
@@ -171,7 +136,7 @@ class Particle(object):
 class ParticleSystem:
 	def __init__(self):
 		self.particleList = []
-		self.surface = Surface(NUM_PIXELS, 1)
+		self.surface = ParticleSurface.create_surface_float(NUM_PIXELS, 1)
 		self.aliveCount = 0
 
 	def addParticle(self, particle):
@@ -189,38 +154,29 @@ class ParticleSystem:
 		return True
 
 	def render(self):
-		# self.surface.clear()
-		self.surface.applyLuminanceMod(s_surfacePersistenceMult)
-		for p in self.particleList:
-			self.particleRender(p)
-		renderStrip(self.surface, s_strip, NUM_PIXELS, 1)
+		width = NUM_PIXELS
+		surface = ParticleSurface.scale(self.surface, width, 1, s_surfacePersistenceMult)
+
+		for particle in self.particleList:
+			# Color all pixels between particle's last position and current position
+			for x in xrange(int(particle.lastUpdateX), int(particle.x), particle.direction):
+				if x >= 0 and x < width - 1:
+					r,g,b = ParticleSurface.get_pixel(surface, x, 0, width)
+					# Blend with current pixel colour using 'screen' mode
+					particleColor = particle.color
+					r = 1 - (1 - r) * (1 - particleColor.red)
+					g = 1 - (1 - g) * (1 - particleColor.green)
+					b = 1 - (1 - b) * (1 - particleColor.blue)
+					# Adjust brightness
+					h,l,s = colorsys.rgb_to_hls(r, g, b)
+					l *= particle.lum
+					r,g,b = colorsys.hls_to_rgb(h, l, s)
+					# Set new pixel colour
+					surface = ParticleSurface.set_pixel(surface, x, 0, width, r, g, b)
+
+		s_strip.show(ParticleSurface.floats_to_ints(surface, width, 1))
+
 		
-	def particleRender(self, particle):
-		x = int(math.floor(particle.x))
-		y = int(math.floor(particle.y))
-		if x < 0 or y < 0 or x >= self.surface.w - 1 or y >= self.surface.h:
-			return
-		lum = particle.lum if particle.lum > 0 else 0
-		alphaX = (1 - (particle.x % 1)) * lum
-		xSpill = (particle.x % 1) * lum
-
-		# Color one pixel ahead of the particle's current position
-		if x < self.surface.w - 2 and x > 2:
-			self.colorPixel(particle.color, particle.alpha, xSpill, x + particle.direction, y)
-		
-		# Color all pixels between particle's last position and current position
-		for i in range(int(math.floor(particle.lastUpdateX)), x, particle.direction):
-			if i >= 0 and i < self.surface.w - 1:
-				self.colorPixel(particle.color, particle.alpha, 1.0, i, y)
-	
-	def colorPixel(self, color, alpha, lumMod, x, y):
-		oldColor = self.surface.getPixel(x, y)
-		c = color
-		cLum = c.GetRGBWithLuminanceMod(lumMod)
-		cLum = alphaBlendColor(cLum, oldColor, alpha)
-		self.surface.setPixel(x, y, cLum.red, cLum.green, cLum.blue)
-
-
 ###############################################################################
 
 
@@ -267,7 +223,7 @@ class FireworkParticle(Particle):
 		# self.flicker = random.uniform(0.0, 0.1)
 	
 	def onUpdate(self):
-		if self.x >= self.particleSystem.surface.w:
+		if self.x >= NUM_PIXELS:
 			self.alive = False
 			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1, self.color))
 			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1, self.color))
@@ -297,7 +253,7 @@ class BounceParticle(Particle):
 		self.hueChangeRate = random.uniform(0.001, 0.01)
 
 	def onUpdate(self):
-		if self.x < 0 or self.x > self.parentSystem.surface.w:
+		if self.x < 0 or self.x > NUM_PIXELS:
 			self.direction *= -1
 		global s_t
 		global s_surfacePersistenceMult
