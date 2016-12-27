@@ -14,33 +14,69 @@ NUM_PIXELS = 120 # Number of LEDs in strip
 DATAPIN   = 10
 CLOCKPIN  = 11
 
+MODEDURATION = 1000
+DEFAULT_PERSISTENCE = 0.9
+
+MODE_FULLRUN 	= 1
+MODE_FIREWORK	= 2
+MODE_BOUNCE		= 3
+
 s_strip     = Adafruit_DotStar(NUM_PIXELS, DATAPIN, CLOCKPIN)
 s_run 		= True
 s_particleSystems = []
-s_surfacePersistenceMult = 0.85
+s_surfacePersistenceMult = DEFAULT_PERSISTENCE
 s_t = 0
+s_modeCycle = [MODE_FULLRUN, MODE_BOUNCE]
+s_mode = 0
+s_modeTimeout = MODEDURATION
+s_nextParticleSpawn = 0
 
 def initStrip():
 	s_strip.begin()
-	s_strip.setBrightness(255) # Limit brightness to ~1/4 duty cycle
+	s_strip.setBrightness(255)
 	s_strip.clear()
-
 
 def stripLoop():
 	while s_run:
+		global s_modeCycle
+		global s_modeTimeout
+		global s_mode
+		global s_t
+		global s_surfacePersistenceMult
+		if s_t > s_modeTimeout:
+			s_modeTimeout = s_t + MODEDURATION
+			s_mode = (s_mode + 1) % len(s_modeCycle)
+			s_surfacePersistenceMult = DEFAULT_PERSISTENCE
+			for system in s_particleSystems:
+				system.particleList = []
+
+		global s_nextParticleSpawn
+		s_nextParticleSpawn -= 1
+		currentMode = s_modeCycle[s_mode]
 		for system in s_particleSystems:
-			if random.randint(0, 50) == 0:
-				system.addParticle(FireworkParticle(random.randint(50, 70), 0, random.choice([1, -1]), system))
+			if currentMode == MODE_FULLRUN and s_nextParticleSpawn <= 0:
+				system.addParticle(FullRunParticle(0, 0, 1))
+				s_nextParticleSpawn = random.randint(25,50)
+			if currentMode == MODE_FIREWORK and random.randint(0, 50) == 0:
+				system.addParticle(FireworkParticle(0, 0, 1, system))
+			if currentMode == MODE_BOUNCE and len(system.particleList) < 2:
+				system.addParticle(BounceParticle(0, 0, system))
+				system.addParticle(BounceParticle(system.surface.w - 1, 0, system))				
 			system.update()
 		for system in s_particleSystems:
 			system.render()
-		global s_t
 		s_t += 1
 		
+def blendAdditive(newColor, oldColor, alpha):
+	return (alpha * newColor) + ((1.0 - alpha) * oldColor)
+
+def blendScreen(newColor, oldColor, alpha):
+	return 1 - (1 - oldColor) * (1 - newColor)
+
 def alphaBlendColor(newColor, oldColor, alpha):
-	r = (alpha * newColor.red) + ((1.0 - alpha) * oldColor.red)
-	g = (alpha * newColor.green) + ((1.0 - alpha) * oldColor.green)
-	b = (alpha * newColor.blue) + ((1.0 - alpha) * oldColor.blue)
+	r = blendScreen(newColor.red, oldColor.red, alpha)
+	g = blendScreen(newColor.green, oldColor.green, alpha)
+	b = blendScreen(newColor.blue, oldColor.blue, alpha)
 	return RGB(r, g, b)
 
 def colorFloatToInt(colorFloat):
@@ -49,7 +85,6 @@ def colorFloatToInt(colorFloat):
 def colorToRgbInt(color):
 	return (colorFloatToInt(color.red) << 16) | (colorFloatToInt(color.green) << 8) | (colorFloatToInt(color.blue))
 
-	
 def renderStrip(surface, strip, w, h):
 	for i in range(w):
 		for j in range(h):
@@ -57,6 +92,8 @@ def renderStrip(surface, strip, w, h):
 			strip.setPixelColor(i, c.rgbInt)
 	strip.show()
 
+def clamp(value, lower, upper):
+	return max(min(value, upper), lower)
 
 class RGB:
 	def __init__(self, r, g, b):
@@ -104,6 +141,7 @@ class Particle(object):
 		self.x = x
 		self.y = y
 		self.velocity = 0.0
+		self.direction = 1
 		self.friction = 1.0
 		self.size = 1.0
 		self.brightness = 1.0
@@ -113,9 +151,13 @@ class Particle(object):
 		self.color = RGB(1, 1, 1)
 		self.alpha = 0.5
 		self.alive = True
+		self.lastUpdateX = 0
+		self.lastUpdateY = 0
 
 	def update(self):
-		self.x += self.velocity
+		self.lastUpdateX = self.x
+		self.lastUpdateY = self.y
+		self.x += self.direction * self.velocity
 		self.brightness -= self.fade
 		self.lum = self.brightness
 		if self.flicker != 0.0:
@@ -130,20 +172,20 @@ class ParticleSystem:
 	def __init__(self):
 		self.particleList = []
 		self.surface = Surface(NUM_PIXELS, 1)
+		self.aliveCount = 0
 
 	def addParticle(self, particle):
 		self.particleList.append(particle)
+		self.aliveCount += 1
 
 	def update(self):
-		aliveCount = len(self.particleList)
 		for particle in self.particleList:
 			particle.update()
 			if not particle.alive:
-				aliveCount -= 1
+				self.aliveCount -= 1
 				self.particleList.remove(particle)
-		if aliveCount <= 0:
+		if self.aliveCount <= 0:
 			return False
-			print "system dwon"
 		return True
 
 	def render(self):
@@ -156,71 +198,116 @@ class ParticleSystem:
 	def particleRender(self, particle):
 		x = int(math.floor(particle.x))
 		y = int(math.floor(particle.y))
-		if x < 0 or y < 0 or x >= self.surface.w or y >= self.surface.h:
-			particle.alive = False
+		if x < 0 or y < 0 or x >= self.surface.w - 1 or y >= self.surface.h:
 			return
 		lum = particle.lum if particle.lum > 0 else 0
 		alphaX = (1 - (particle.x % 1)) * lum
 		xSpill = (particle.x % 1) * lum
-		
-		oldColor = self.surface.getPixel(x, y)
-		c = particle.color
-		cLum = c.GetRGBWithLuminanceMod(alphaX)
-		cLum = alphaBlendColor(cLum, oldColor, particle.alpha)
-		self.surface.setPixel(x, y, cLum.red, cLum.green, cLum.blue)
 
-		if x >= self.surface.w - 2:
-			return
-		oldSpillColor = self.surface.getPixel(x + 1, y)
-		cSpill = particle.color
-		cLum = cSpill.GetRGBWithLuminanceMod(xSpill)
-		cLum = alphaBlendColor(cLum, oldSpillColor, particle.alpha)
-		self.surface.setPixel(x + 1, y, cLum.red, cLum.green, cLum.blue)
+		# Color one pixel ahead of the particle's current position
+		if x < self.surface.w - 2 and x > 2:
+			self.colorPixel(particle.color, particle.alpha, xSpill, x + particle.direction, y)
+		
+		# Color all pixels between particle's last position and current position
+		for i in range(int(math.floor(particle.lastUpdateX)), x, particle.direction):
+			if i >= 0 and i < self.surface.w - 1:
+				self.colorPixel(particle.color, particle.alpha, 1.0, i, y)
+	
+	def colorPixel(self, color, alpha, lumMod, x, y):
+		oldColor = self.surface.getPixel(x, y)
+		c = color
+		cLum = c.GetRGBWithLuminanceMod(lumMod)
+		cLum = alphaBlendColor(cLum, oldColor, alpha)
+		self.surface.setPixel(x, y, cLum.red, cLum.green, cLum.blue)
 
 
 ###############################################################################
 
 
 class ExplodedParticle(Particle):
-	def __init__(self, x, y, direction):
+	def __init__(self, x, y, direction, color):
 		super(ExplodedParticle, self).__init__(x, y)
-		self.fade = random.uniform(0.1, 0.2)
-		self.flicker = random.uniform(0.1, 0.2)
-		self.velocity = direction * random.uniform(2.2, 4.4)
-		self.friction = random.uniform(0.95, 1.0)
-		self.alpha = 0.2
+		# self.fade = random.uniform(0.1, 0.2)
+		# self.flicker = random.uniform(0.3, 0.5)
+		self.direction = direction
+		self.velocity = self.direction * random.uniform(3.0, 5.0)
+		self.friction = random.uniform(0.8, 0.95)
+		self.alpha = 0.5
 		global s_t
-		self.deathTime = s_t + random.randint(15, 30)
+		self.deathTime = s_t + random.randint(20, 50)
+		r,g,b = color.red, color.green, color.blue
+		if (r,g,b) != (1,1,1):
+			h,l,s = colorsys.rgb_to_hls(r,g,b)
+			h = clamp(h + random.uniform(-0.2, 0.2), 0.0, 1.0)
+			l = 1.0
+			s = random.uniform(0.8, 1.0)
+			r,g,b = colorsys.hls_to_rgb(h,l,s)
+		self.color.red = r
+		self.color.green = g
+		self.color.blue = b
 
 	def onUpdate(self):
+		global s_t
 		if s_t > self.deathTime:
 			self.alive = False
 
 class FireworkParticle(Particle):
-	s_minNumExplode = 1
-	s_maxNumExplode = 3
-
 	def __init__(self, x, y, direction, particleSystem):
 		super(FireworkParticle, self).__init__(x, y)
 		self.particleSystem = particleSystem
-		self.velocity = direction * random.uniform(0.5, 2.5)
-		self.friction = random.uniform(0.95,1.0)
-		h, s, v = random.random(), random.uniform(0.8, 1.0), 1.0
+		self.alpha = 0.9
+		self.direction = direction
+		self.velocity = self.direction * random.uniform(2, 2.5)
+		h, s, v = random.random(), 1.0, 1.0
 		r, g, b = colorsys.hsv_to_rgb(h, s, v)
 		self.color.red = r
 		self.color.green = g
 		self.color.blue = b
-		self.fade = random.uniform(0.01, 0.05)
-		self.flicker = random.uniform(0.0, 0.1)
-		global s_t
-		self.deathTime = s_t + random.randint(10, 60)
+		# self.fade = random.uniform(0.1, 0.2)
+		# self.flicker = random.uniform(0.0, 0.1)
 	
 	def onUpdate(self):
-		global s_t
-		if s_t > self.deathTime:
+		if self.x >= self.particleSystem.surface.w:
 			self.alive = False
-			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, 1))
-			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1))
+			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1, self.color))
+			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1, self.color))
+			self.particleSystem.addParticle(ExplodedParticle(self.x, self.y, -1, self.color))
+
+class FullRunParticle(Particle):
+	def __init__(self, x, y, direction):
+		super(FullRunParticle, self).__init__(x, y)
+		self.direction = direction
+		self.velocity = direction * random.uniform(2.1, 8.1)
+		h, s, v = random.random(), 1.0, 1.0
+		r, g, b = colorsys.hsv_to_rgb(h, s, v)
+		self.color.red = r
+		self.color.green = g
+		self.color.blue = b
+
+class BounceParticle(Particle):
+	def __init__(self, x, y, parentSystem):
+		super(BounceParticle, self).__init__(x, y)
+		self.parentSystem = parentSystem
+		self.velocity = 4
+		h, s, v = random.random(), 1.0, 1.0
+		r, g, b = colorsys.hsv_to_rgb(h, s, v)
+		self.color.red = r
+		self.color.green = g
+		self.color.blue = b
+		self.hueChangeRate = random.uniform(0.001, 0.01)
+
+	def onUpdate(self):
+		if self.x < 0 or self.x > self.parentSystem.surface.w:
+			self.direction *= -1
+		global s_t
+		global s_surfacePersistenceMult
+		s_surfacePersistenceMult = clamp(math.fabs(math.sin(s_t/128)), 0.5, 1.0)
+		h,s,v = colorsys.rgb_to_hsv(self.color.red, self.color.green, self.color.blue)
+		h += self.hueChangeRate + random.uniform(0.0, self.hueChangeRate)
+		r,g,b = colorsys.hsv_to_rgb(h,s,v)
+		self.color.red = r
+		self.color.green = g
+		self.color.blue = b
 
 ###############################################################################
 
@@ -229,22 +316,8 @@ initStrip()
 system = ParticleSystem()
 s_particleSystems.append(system)
 
-for i in range(0, 10):
-	p = FireworkParticle(random.randint(50, 70), 0, random.choice([1, -1]), system)
-	system.addParticle(p)
-
-
-# p = FireworkParticle(0, 0, system)
-# system.addParticle(p)
-
-# p = Particle(30, 0)
-# p.velocity = 2
-# p.color.green = 0
-# system.addParticle(p)
-# p = Particle(90, 0)
-# p.color.red = 0
-# p.velocity = -2
-# system.addParticle(p)
+p = FireworkParticle(0, 0, 1, system)
+system.addParticle(p)
 
 import cProfile
 if len(sys.argv) > 1 and sys.argv[1] == '--profile':
