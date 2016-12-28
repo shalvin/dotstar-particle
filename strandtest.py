@@ -15,7 +15,7 @@ numpixels = 120 # Number of LEDs in strip
 # Here's how to control the strip from any two GPIO pins:
 datapin   = 10
 clockpin  = 11
-strip     = Adafruit_DotStar(numpixels, datapin, clockpin)
+strip     = Adafruit_DotStar(numpixels, 8000000)
 
 # Alternate ways of declaring strip:
 # strip   = Adafruit_DotStar(numpixels)           # Use SPI (pins 10=MOSI, 11=SCLK)
