@@ -3,11 +3,12 @@
 import sys
 import time
 import random
-import ParticleSurface
-from switchio import gpio_init, gpio_cleanup
+import time
+from switchio import gpio_cleanup
 from ParticleBase import ParticleSystem
 from RunningParticle import RunningParticle, RunningParticleSystem
 from BpmParticle import BpmParticle, BpmParticleSystem
+from CountdownParticle import CountdownParticleSystem
 from dotstar import Adafruit_DotStar
 
 NUM_PIXELS = 120 # Number of LEDs in strip
@@ -20,7 +21,7 @@ FPS = 120.0
 
 s_strip = Adafruit_DotStar()
 s_run = True
-s_particleSystems = [BpmParticleSystem(FPS / 1.0, s_strip, NUM_PIXELS)]
+s_particleSystems = [CountdownParticleSystem(FPS / 1.0, s_strip, NUM_PIXELS)]
 
 def initStrip():
     s_strip.begin()
@@ -42,11 +43,9 @@ def stripLoop():
             system.render(system.update(dt))
         
 
-
 ###############################################################################
 
 initStrip()
-gpio_init()
 
 try:
     import cProfile

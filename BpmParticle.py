@@ -1,8 +1,13 @@
 import random
 import colorsys
+import time
 from ParticleBase import Particle, ParticleSystem
-from util import clamp
+from util import clamp, average
+from switchio import gpio_init
+from threading import Lock
 
+DETECTION_TIMEOUT = 3.0
+DEBOUNCE = 0.2
 
 class BpmParticleSystem(ParticleSystem):
     def __init__(self, tickRate, strip, width):
@@ -14,17 +19,20 @@ class BpmParticleSystem(ParticleSystem):
         self.beatsPerMeasure = 4
         self.currentBeat = 1
         self.hue = random.random()
-
+        
+        self.lastPedalPressTime = time.time()
+        self.lastPedalTimePeriods = []
+        self.ioLock = Lock()
+        gpio_init(self.io_callback)
+    
     def onUpdate(self, dt):
         self.timeSinceLastSpawn += dt
-        if self.timeSinceLastSpawn > self.spawnPeriodMS:
+        if self.timeSinceLastSpawn >= self.spawnPeriodMS:
             width = self.width
             if self.currentBeat == 1:
                 self.hue = random.random()
-                for i in xrange(self.width):
-                    self.addParticle(FadeParticle(i, self.hue, self.spawnPeriodMS / 16))
+                r,g,b = colorsys.hsv_to_rgb(self.hue, 1.0, 1.0)
                 self.addParticle(BpmParticle(0, 0, 1, width / self.spawnPeriodMS, self.hue))
-                # self.addParticle(BpmParticle(width - 1, 0, -1, width / self.spawnPeriodMS, self.hue))
             elif self.currentBeat % 2 == 0:
                 self.addParticle(BpmParticle(width - 1, 0, -1, width / self.spawnPeriodMS, self.hue))
             else:
@@ -35,9 +43,37 @@ class BpmParticleSystem(ParticleSystem):
             if self.currentBeat > self.beatsPerMeasure:
                 self.currentBeat = 1
     
+    def reset(self):
+        self.currentBeat = 1
+        self.timeSinceLastSpawn = self.spawnPeriodMS
+    
     def setBpm(self, bpm):
+        if bpm > 400:
+            return
         self.bpm = bpm
-        self.spawnPeriodMS = bpm / 60 * 1000
+        self.spawnPeriodMS = 1.0 / self.bpm * 60.0
+        
+    def io_callback(self, channel):
+        if self.ioLock.locked():
+            return
+        self.ioLock.acquire()
+        currentTime = time.time()
+        period = currentTime - self.lastPedalPressTime
+        
+        if period > DETECTION_TIMEOUT:
+            self.lastPedalTimePeriods = []
+            self.lastPedalPressTime = currentTime
+            self.ioLock.release()
+            return
+
+        self.lastPedalPressTime = currentTime
+        self.lastPedalTimePeriods.append(period)
+        if len(self.lastPedalTimePeriods) > 4:
+            del self.lastPedalTimePeriods[0]
+        self.setBpm(60.0 / average(self.lastPedalTimePeriods))
+        self.reset()
+        self.ioLock.release()
+        print "set %f, period %f" % (self.bpm, period)
 
 
 class BpmParticle(Particle):
@@ -73,3 +109,4 @@ class FadeParticle(Particle):
         self.brightness = self.timeLeft / self.timeToLive
         if self.timeLeft < 0.0:
             self.alive = False
+

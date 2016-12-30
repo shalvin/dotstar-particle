@@ -1,16 +1,18 @@
-import ParticleSurface
+from ParticleSurface import Surface
 import colorsys
 import time
+from threading import Lock
 
 class ParticleSystem(object):
     def __init__(self, tickRate, strip, width):
         self.strip = strip
         self.particleList = []
-        self.surface = ParticleSurface.create_surface_float(width, 1)
-        self.aliveCount = 0
+        self.particleListLock = Lock()
+        self.surface = Surface(width)
         self.width = width
+        self.aliveCount = 0
         self.persistenceMult = 0.0
-        self.strip.show(ParticleSurface.floats_to_ints(self.surface, width, 1))
+        self.strip.show(self.surface.getIntArray())
         self.tickRate = tickRate
         self.lastUpdatedTime = time.time()
 
@@ -30,18 +32,19 @@ class ParticleSystem(object):
         self.lastUpdatedTime = currentTime
 
         self.onUpdate(updateDt)
+        self.particleListLock.acquire()
         for particle in self.particleList:
             particle.update(updateDt)
             if not particle.alive or (particle.x < self.width * -2 or particle.x > self.width * 2):
                 self.aliveCount -= 1
                 self.particleList.remove(particle)
+        self.particleListLock.release()
         return True
 
 
     def render(self, hasTicked):
         width = self.width
-        surface = ParticleSurface.scale(self.surface, self.persistenceMult)
-        
+        self.surface.scale(self.persistenceMult)
         if hasTicked:
             for particle in self.particleList:
                 prevX = int(particle.lastUpdateX)
@@ -54,7 +57,7 @@ class ParticleSystem(object):
                 # Color all pixels between particle's last position and current position
                 for x in xrange(prevX, currX, direction):
                     if x >= 0 and x < width:
-                        r,g,b = ParticleSurface.get_pixel(surface, x, 0, width)
+                        r,g,b = self.surface.getPixel(x)
                         # Blend with current pixel colour using 'screen' mode
                         r = 1 - (1 - r) * (1 - particle.red)
                         g = 1 - (1 - g) * (1 - particle.green)
@@ -64,10 +67,8 @@ class ParticleSystem(object):
                         l *= particle.lum
                         r,g,b = colorsys.hls_to_rgb(h, l, s)
                         # Set new pixel colour
-                        surface = ParticleSurface.set_pixel(surface, x, 0, width, r, g, b)
-
-        self.strip.show(ParticleSurface.floats_to_ints(surface, width, 1))
-        self.surface = surface
+                        surface = self.surface.setPixel(x, r, g, b)
+        self.strip.show(self.surface.getIntArray())
 
 
 class Particle(object):
